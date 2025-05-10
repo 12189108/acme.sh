@@ -52,7 +52,30 @@ dns_huaweicloud_add() {
     return 1
   fi
   _debug "Zone ID is:" "${zoneid}"
-
+  
+  export _H1="X-Auth-Token: ${token}"
+  response_list=$(_get "${dns_api}/v2/zones/${zoneid}/recordsets?name=${fulldomain}&type=CNAME")
+  _debug2 "Existing recordsets response: $response_list"
+  # Use the GET API to query the list of record sets with the same name
+  disabled_ids=$(echo "$response_list" | grep -o '"id": *"[^"]*"' | cut -d\" -f4)
+  if [ -n "$disabled_ids" ]; then
+    _debug "Disabling existing records: $disabled_ids"
+    for rid in $disabled_ids; do
+      _info "Disabling recordset id: $rid"
+      export _H1="X-Auth-Token: ${token}"
+      export _H2="Content-Type: application/json"
+      body='{"status":"DISABLE"}'
+      _post "${body}" "${dns_api}/v2.1/recordsets/${rid}/statuses/set" false "PUT" >/dev/null
+      ret="$?"
+      [ "$ret" -ne 0 ] && _err "SetRecordSetsStatus DISABLE failed for ${rid}"
+    done
+    # Save the IDs of the disabled record sets to a local file for future recoverySave the IDs of the disabled record sets to a local file for future recovery
+    state_dir="${HOME}/.acme.sh/huaweicloud"
+    mkdir -p "${state_dir}"
+    state_file="${state_dir}/${zoneid}_${fulldomain//./_}.ids"
+    printf "%s\n" $disabled_ids > "$state_file"
+    _debug "Disabled record IDs saved to $state_file"
+  fi
   _debug "Adding Record"
   _add_record "${token}" "${fulldomain}" "${txtvalue}"
   ret="$?"
@@ -111,7 +134,23 @@ dns_huaweicloud_rm() {
     _err "dns_api(dns_huaweicloud): Error removing record."
     return 1
   fi
-
+  export _H1="X-Auth-Token: ${token}"
+  state_dir="${HOME}/.acme.sh/huaweicloud"
+  state_file="${state_dir}/${zoneid}_${fulldomain//./_}.ids"
+  if [ -f "$state_file" ]; then
+    _debug "Re-enabling original records from $state_file"
+    while IFS= read -r rid; do
+      [ -z "$rid" ] && continue
+      _info "Re-enabling recordset id: $rid"
+      export _H1="X-Auth-Token: ${token}"
+      export _H2="Content-Type: application/json;charset=utf8"
+      body='{"status":"ENABLE"}'
+      _post "${body}" "${dns_api}/v2.1/recordsets/${rid}/statuses/set" false "PUT"
+      ret="$?"
+      [ "$ret" -ne 0 ] && _err "SetRecordSetsStatus ENABLE failed for ${rid}"
+    done < "$state_file"
+    rm -f "$state_file"
+  fi
   return 0
 }
 
@@ -210,7 +249,7 @@ _get_recordset_id() {
   _zoneid=$3
   export _H1="X-Auth-Token: ${_token}"
 
-  response=$(_get "${dns_api}/v2/zones/${_zoneid}/recordsets?name=${_domain}&status=ACTIVE")
+  response=$(_get "${dns_api}/v2/zones/${_zoneid}/recordsets?name=${_domain}&status=ACTIVE&type=TXT")
   if _contains "${response}" '"id"'; then
     _id="$(echo "${response}" | _egrep_o "\"id\": *\"[^\"]*\"" | cut -d : -f 2 | tr -d \" | tr -d " ")"
     printf "%s" "${_id}"
